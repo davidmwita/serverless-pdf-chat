@@ -1,9 +1,15 @@
 
 # Created by https://www.gitignore.io/api/osx,linux,python,windows,pycharm,visualstudiocode
 
-### SAM ###
-.aws-sam/
-samconfig.toml
+node_modules
+package-lock.json
+
+*.ts
+!*.d.ts
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
 
 ### Linux ###
 *~
