@@ -145,14 +145,29 @@ export class ServerlessPdfChatStack extends Stack {
 
 
 
-    // Lambda Functions
+    // Lambda Function Layers
     const powertoolsLayer = lambda.LayerVersion.fromLayerVersionArn(this, 'PowertoolsLayer', `arn:aws:lambda:${this.region}:017000801446:layer:AWSLambdaPowertoolsPythonV2-Arm64:51`);
+    const langchainLayer = new lambda.LayerVersion(this, 'LangchainLayer', {
+      code: lambda.Code.fromAsset('layers/langchain_layer.zip')
+    });
+    const pypdfLayer = new lambda.LayerVersion(this, 'PypdfLayer', {
+      code: lambda.Code.fromAsset('layers/pypdf2_layer.zip')
+    });
+    const shortUuidLayer = new lambda.LayerVersion(this, 'ShortUuidLayer', {
+      code: lambda.Code.fromAsset('layers/shortuuid_layer.zip')
+    });
+    const urllibLayer = new lambda.LayerVersion(this, 'UrllibLayer', {
+      code: lambda.Code.fromAsset('layers/urllib_layer.zip')
+    });
+
+    
+    // Lambda Functions
     const createLambdaFunction = (
       id: string,
       codePath: string,
       handler: string,
       environment?: { [key: string]: string },
-      policies?: iam.PolicyStatement[]
+      policies?: iam.PolicyStatement[],
     ) => {
       const lambdaFunction = new lambda.Function(this, id, {
         runtime: lambda.Runtime.PYTHON_3_11,
@@ -182,12 +197,12 @@ export class ServerlessPdfChatStack extends Stack {
         resources: [documentBucket.bucketArn, `${documentBucket.bucketArn}/*`],
       }),
     ]);
+    generatePresignedUrlFunction.addLayers(shortUuidLayer);
     const generatePresignedUrlIntegration = new apigateway.LambdaIntegration(generatePresignedUrlFunction);
     const generatePresignedUrlResource = api.root.addResource('generate_presigned_url');
     generatePresignedUrlResource.addMethod('GET', generatePresignedUrlIntegration, {
       authorizer: cognitoAuthorizer
     });
-
 
 
     const uploadTriggerFunction = createLambdaFunction('UploadTriggerFunction', 'src/upload_trigger/', 'main.lambda_handler', {
@@ -209,6 +224,7 @@ export class ServerlessPdfChatStack extends Stack {
         resources: [embeddingQueue.queueArn],
       }),
     ],);
+    uploadTriggerFunction.addLayers(pypdfLayer, shortUuidLayer, urllibLayer);
     uploadTriggerFunction.addEventSource(new lambda_event_sources.S3EventSource(documentBucket, {
       events: [s3.EventType.OBJECT_CREATED],
       filters: [{ suffix: '.pdf' }],
@@ -256,6 +272,7 @@ export class ServerlessPdfChatStack extends Stack {
         resources: [documentTable.tableArn, memoryTable.tableArn],
       }),
     ]);
+    addConversationFunction.addLayers(shortUuidLayer);
     const addConversationFunctionIntegration = new apigateway.LambdaIntegration(addConversationFunction);
     root_doc_documentid_resource.addMethod('POST', addConversationFunctionIntegration, {
       authorizer: cognitoAuthorizer
@@ -284,6 +301,7 @@ export class ServerlessPdfChatStack extends Stack {
         resources: [`arn:aws:bedrock:*::foundation-model/${embeddingModelId}`],
       }),
     ]);
+    generateEmbeddingsFunction.addLayers(langchainLayer);
     generateEmbeddingsFunction.addEventSource(new lambda_event_sources.SqsEventSource(embeddingQueue, {
       batchSize: 1,
     }));
@@ -314,6 +332,7 @@ export class ServerlessPdfChatStack extends Stack {
         ],
       }),
     ]);
+    generateResponseFunction.addLayers(shortUuidLayer);
     const generateResponseFunctionIntegration = new apigateway.LambdaIntegration(generateResponseFunction);
     const root_documentid_resource = api.root.addResource('{documentid}');
     const root_documentid_conversationid_resource = root_documentid_resource.addResource('{conversationid}');
