@@ -14,6 +14,7 @@ MEMORY_TABLE = os.environ["MEMORY_TABLE"]
 BUCKET = os.environ["BUCKET"]
 MODEL_ID = os.environ["MODEL_ID"]
 EMBEDDING_MODEL_ID = os.environ["EMBEDDING_MODEL_ID"]
+REGION = os.environ["REGION"]
 
 s3 = boto3.client("s3")
 logger = Logger()
@@ -22,13 +23,13 @@ logger = Logger()
 def get_embeddings():
     bedrock_runtime = boto3.client(
         service_name="bedrock-runtime",
-        region_name="us-east-1",
+        region_name=REGION,
     )
 
     embeddings = BedrockEmbeddings(
         model_id=EMBEDDING_MODEL_ID,
         client=bedrock_runtime,
-        region_name="us-east-1",
+        region_name=REGION,
     )
     return embeddings
 
@@ -84,7 +85,7 @@ def lambda_handler(event, context):
     memory = create_memory(conversation_id)
     bedrock_runtime = boto3.client(
         service_name="bedrock-runtime",
-        region_name="us-east-1",
+        region_name=REGION,
     )
 
     response = bedrock_chain(faiss_index, memory, human_input, bedrock_runtime)

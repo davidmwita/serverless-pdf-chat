@@ -9,6 +9,8 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambda_event_sources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as amplify from '@aws-cdk/aws-amplify-alpha';
+import * as ec2 from 'aws-cdk-lib/aws-ec2'
+import * as rds from 'aws-cdk-lib/aws-rds';
 import { BuildSpec } from "aws-cdk-lib/aws-codebuild";
 import { Construct } from 'constructs';
 
@@ -24,20 +26,68 @@ export class ServerlessPdfChatStack extends Stack {
 
     const {
       frontend = 'amplify',
-      modelId = 'anthropic.claude-3-sonnet-20240229-v1:0',
+      modelId = 'mistral.mixtral-8x7b-instruct-v0:1' /** originally: 'anthropic.claude-3-sonnet-20240229-v1:0' */,
       embeddingModelId = 'amazon.titan-embed-text-v2:0',
     } = props;
   
 
 
+    // VPC - verify configuration
+    const natGatewayProvider = ec2.NatProvider.gateway()
+    const vpc = new ec2.Vpc(this, 'VPC', {
+      vpcName: `${this.stackName.toLowerCase()}-${this.region}-${this.account}`,
+      ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
+      natGatewayProvider: natGatewayProvider,
+      natGateways: 1,
+      maxAzs: 2,
+      subnetConfiguration: [
+        {
+          cidrMask: 24,
+          name: "public",
+          subnetType: ec2.SubnetType.PUBLIC,
+        },
+        {
+          cidrMask: 24,
+          name: "private",
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        },
+      ]
+    })
+
+
+
+    // RDS Postgres
+    const rdsDatabaseInstance = new rds.DatabaseInstance(this, 'RdsDatabaseInstance', {
+      databaseName: `${this.stackName.toLowerCase()}DBInstance`,
+      vpc: vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+      },
+      engine: rds.DatabaseInstanceEngine.postgres({
+        version: rds.PostgresEngineVersion.VER_16_3,
+      }),
+      instanceType: ec2.InstanceType.of(
+        ec2.InstanceClass.BURSTABLE3,
+        ec2.InstanceSize.MEDIUM,
+      ),
+      credentials: rds.Credentials.fromUsername('lci_admin', {
+        secretName: "lci/credentials/db",
+      }),
+      multiAz: true,
+      deletionProtection: true,
+      monitoringInterval: cdk.Duration.seconds(60),
+    })
+
+
+
     // S3 Bucket
     const documentBucket = new s3.Bucket(this, 'DocumentBucket', {
-      bucketName: `${this.stackName.toLowerCase()}-${this.region}-${this.account}`, // set vars
+      bucketName: `${this.stackName.toLowerCase()}-${this.region}-${this.account}`,
       cors: [
         {
           allowedHeaders: ['*'],
           allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD, s3.HttpMethods.POST, s3.HttpMethods.DELETE],
-          allowedOrigins: ['*'],
+          allowedOrigins: ['*'], /** TODO: check why this reverts to amplify origin in deployment */
         },
       ],
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -146,7 +196,7 @@ export class ServerlessPdfChatStack extends Stack {
 
 
     // Lambda Function Layers
-    const powertoolsLayer = lambda.LayerVersion.fromLayerVersionArn(this, 'PowertoolsLayer', `arn:aws:lambda:${this.region}:017000801446:layer:AWSLambdaPowertoolsPythonV2-Arm64:51`);
+    const powertoolsLayer = lambda.LayerVersion.fromLayerVersionArn(this, 'PowertoolsLayer', `arn:aws:lambda:${this.region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:78`);
     const langchainLayer = new lambda.LayerVersion(this, 'LangchainLayer', {
       code: lambda.Code.fromAsset('layers/langchain_layer.zip')
     });
@@ -166,19 +216,20 @@ export class ServerlessPdfChatStack extends Stack {
       id: string,
       codePath: string,
       handler: string,
+      vpc?: ec2.IVpc,
       environment?: { [key: string]: string },
       policies?: iam.PolicyStatement[],
     ) => {
       const lambdaFunction = new lambda.Function(this, id, {
-        runtime: lambda.Runtime.PYTHON_3_11,
+        runtime: lambda.Runtime.PYTHON_3_12,
         handler,
         code: lambda.Code.fromAsset(codePath),
         environment,
         timeout: cdk.Duration.seconds(180),
         memorySize: 2048,
         tracing: lambda.Tracing.ACTIVE,
-        architecture: lambda.Architecture.ARM_64,
         layers: [powertoolsLayer],
+        vpc: (vpc? vpc: undefined),
       });
 
       if (policies) {
@@ -188,7 +239,7 @@ export class ServerlessPdfChatStack extends Stack {
       return lambdaFunction;
     };
 
-    const generatePresignedUrlFunction = createLambdaFunction('GeneratePresignedUrlFunction', 'src/generate_presigned_url/', 'main.lambda_handler', {
+    const generatePresignedUrlFunction = createLambdaFunction('GeneratePresignedUrlFunction', 'src/generate_presigned_url/', 'main.lambda_handler', undefined, {
       BUCKET: documentBucket.bucketName,
       REGION: this.region,
     }, [
@@ -205,7 +256,7 @@ export class ServerlessPdfChatStack extends Stack {
     });
 
 
-    const uploadTriggerFunction = createLambdaFunction('UploadTriggerFunction', 'src/upload_trigger/', 'main.lambda_handler', {
+    const uploadTriggerFunction = createLambdaFunction('UploadTriggerFunction', 'src/upload_trigger/', 'main.lambda_handler', undefined, {
       DOCUMENT_TABLE: documentTable.tableName,
       MEMORY_TABLE: memoryTable.tableName,
       QUEUE: embeddingQueue.queueName,
@@ -231,7 +282,7 @@ export class ServerlessPdfChatStack extends Stack {
     }))
 
 
-    const getAllDocumentsFunction = createLambdaFunction('GetAllDocuments', 'src/get_all_documents/', 'main.lambda_handler', {
+    const getAllDocumentsFunction = createLambdaFunction('GetAllDocuments', 'src/get_all_documents/', 'main.lambda_handler', undefined, {
       DOCUMENT_TABLE: documentTable.tableName,
     }, [
       new iam.PolicyStatement({
@@ -246,7 +297,7 @@ export class ServerlessPdfChatStack extends Stack {
     });
 
 
-    const getDocumentFunction = createLambdaFunction('GetDocumentFunction', 'src/get_document/', 'main.lambda_handler', {
+    const getDocumentFunction = createLambdaFunction('GetDocumentFunction', 'src/get_document/', 'main.lambda_handler', undefined, {
       DOCUMENT_TABLE: documentTable.tableName,
       MEMORY_TABLE: memoryTable.tableName,
     }, [
@@ -263,7 +314,7 @@ export class ServerlessPdfChatStack extends Stack {
     });
 
 
-    const addConversationFunction = createLambdaFunction('AddConversationFunction', 'src/add_conversation/', 'main.lambda_handler', {
+    const addConversationFunction = createLambdaFunction('AddConversationFunction', 'src/add_conversation/', 'main.lambda_handler', undefined, {
       DOCUMENT_TABLE: documentTable.tableName,
       MEMORY_TABLE: memoryTable.tableName,
     }, [
@@ -279,10 +330,12 @@ export class ServerlessPdfChatStack extends Stack {
     });
 
 
-    const generateEmbeddingsFunction = createLambdaFunction('GenerateEmbeddingsFunction', 'src/generate_embeddings/', 'main.lambda_handler', {
+    const generateEmbeddingsFunction = createLambdaFunction('GenerateEmbeddingsFunction', 'src/generate_embeddings/', 'main.lambda_handler', vpc, {
       DOCUMENT_TABLE: documentTable.tableName,
       BUCKET: documentBucket.bucketName,
       EMBEDDING_MODEL_ID: embeddingModelId,
+      REGION: this.region,
+      DATABASE_SECRET_NAME: rdsDatabaseInstance.secret!.secretName,
     }, [
       new iam.PolicyStatement({
         actions: ['sqs:*'],
@@ -298,20 +351,27 @@ export class ServerlessPdfChatStack extends Stack {
       }),
       new iam.PolicyStatement({
         actions: ['bedrock:InvokeModel'],
-        resources: [`arn:aws:bedrock:*::foundation-model/${embeddingModelId}`],
+        resources: [`arn:aws:bedrock:${this.region}::foundation-model/${embeddingModelId}`],
       }),
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [rdsDatabaseInstance.secret!.secretArn],
+      })
     ]);
+    generateEmbeddingsFunction.connections.allowToDefaultPort(rdsDatabaseInstance);
     generateEmbeddingsFunction.addLayers(langchainLayer);
     generateEmbeddingsFunction.addEventSource(new lambda_event_sources.SqsEventSource(embeddingQueue, {
       batchSize: 1,
     }));
 
 
-    const generateResponseFunction = createLambdaFunction('GenerateResponseFunction', 'src/generate_response/', 'main.lambda_handler',{
+    const generateResponseFunction = createLambdaFunction('GenerateResponseFunction', 'src/generate_response/', 'main.lambda_handler', vpc, {
       MEMORY_TABLE: memoryTable.tableName,
       BUCKET: documentBucket.bucketName,
       MODEL_ID: modelId,
       EMBEDDING_MODEL_ID: embeddingModelId,
+      REGION: this.region,
+      DATABASE_SECRET_NAME: rdsDatabaseInstance.secret!.secretName,
     },
     [
       new iam.PolicyStatement({
@@ -331,8 +391,13 @@ export class ServerlessPdfChatStack extends Stack {
           `arn:aws:bedrock:${this.region}::foundation-model/${embeddingModelId}`,
         ],
       }),
+      new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [rdsDatabaseInstance.secret!.secretArn],
+      })
     ]);
-    generateResponseFunction.addLayers(shortUuidLayer);
+    generateResponseFunction.connections.allowToDefaultPort(rdsDatabaseInstance);
+    generateResponseFunction.addLayers(shortUuidLayer, langchainLayer);
     const generateResponseFunctionIntegration = new apigateway.LambdaIntegration(generateResponseFunction);
     const root_documentid_resource = api.root.addResource('{documentid}');
     const root_documentid_conversationid_resource = root_documentid_resource.addResource('{conversationid}');
@@ -341,7 +406,7 @@ export class ServerlessPdfChatStack extends Stack {
     });
 
 
-    const deleteDocumentFunction = createLambdaFunction('DeleteDocumentFunction', 'src/delete_document/', 'main.lambda_handler',{
+    const deleteDocumentFunction = createLambdaFunction('DeleteDocumentFunction', 'src/delete_document/', 'main.lambda_handler', undefined, {
       DOCUMENT_TABLE: documentTable.tableName,
       MEMORY_TABLE: memoryTable.tableName,
       BUCKET: documentBucket.bucketName,
