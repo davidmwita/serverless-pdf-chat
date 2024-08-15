@@ -14,6 +14,7 @@ s3 = boto3.client("s3")
 logger = Logger()
 
 
+### TODO: Implement deletion from vector store
 @logger.inject_lambda_context(log_event=True)
 def lambda_handler(event, context):
     user_id = event["requestContext"]["authorizer"]["claims"]["sub"]

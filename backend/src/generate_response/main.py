@@ -5,9 +5,12 @@ from aws_lambda_powertools import Logger
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
-from langchain_community.vectorstores import FAISS
-from langchain_aws.chat_models import ChatBedrock
-from langchain_aws.embeddings import BedrockEmbeddings
+# from langchain_community.vectorstores import FAISS
+# from langchain_aws.chat_models import ChatBedrock
+# from langchain_aws.embeddings import BedrockEmbeddings
+from langchain_postgres.vectorstores import PGVector
+from langchain_community.llms.bedrock import Bedrock
+from langchain_community.embeddings import BedrockEmbeddings
 
 
 MEMORY_TABLE = os.environ["MEMORY_TABLE"]
@@ -15,29 +18,34 @@ BUCKET = os.environ["BUCKET"]
 MODEL_ID = os.environ["MODEL_ID"]
 EMBEDDING_MODEL_ID = os.environ["EMBEDDING_MODEL_ID"]
 REGION = os.environ["REGION"]
+DATABASE_SECRET_NAME = os.environ["DATABASE_SECRET_NAME"]
 
 s3 = boto3.client("s3")
 logger = Logger()
 
 
-def get_embeddings():
-    bedrock_runtime = boto3.client(
-        service_name="bedrock-runtime",
+def get_db_secret():
+    sm_client = boto3.client(
+        service_name="secretsmanager",
         region_name=REGION,
     )
+    response = sm_client.get_secret_value(
+        SecretId=DATABASE_SECRET_NAME
+    )["SecretString"]
+    secret = json.loads(response)
+    return secret
 
-    embeddings = BedrockEmbeddings(
-        model_id=EMBEDDING_MODEL_ID,
-        client=bedrock_runtime,
-        region_name=REGION,
+
+def get_vector_store(bedrock_embeddings, user_id, file_name):
+    collection_name = f"{user_id}_{file_name}"
+    db_secrets = get_db_secret()
+    vectorstore = PGVector(
+        embeddings=bedrock_embeddings,
+        collection_name=collection_name,
+        connection=f"postgresql+psycopg2://{db_secrets['username']}:{db_secrets['password']}@{db_secrets['host']}:5432/{db_secrets['dbname']}?sslmode=require",
+        use_jsonb=True,
     )
-    return embeddings
-
-def get_faiss_index(embeddings, user, file_name):
-    s3.download_file(BUCKET, f"{user}/{file_name}/index.faiss", "/tmp/index.faiss")
-    s3.download_file(BUCKET, f"{user}/{file_name}/index.pkl", "/tmp/index.pkl")
-    faiss_index = FAISS.load_local("/tmp", embeddings, allow_dangerous_deserialization=True)
-    return faiss_index
+    return vectorstore
 
 def create_memory(conversation_id):
     message_history = DynamoDBChatMessageHistory(
@@ -53,17 +61,18 @@ def create_memory(conversation_id):
     )
     return memory
 
-def bedrock_chain(faiss_index, memory, human_input, bedrock_runtime):
+def bedrock_chain(vectore_store, memory, human_input, bedrock_runtime):
 
-    chat = ChatBedrock(
+    chat = Bedrock(
         model_id=MODEL_ID,
+        client=bedrock_runtime,
         model_kwargs={'temperature': 0.0}
     )
 
     chain = ConversationalRetrievalChain.from_llm(
         llm=chat,
         chain_type="stuff",
-        retriever=faiss_index.as_retriever(),
+        retriever=vectore_store.as_retriever(),
         memory=memory,
         return_source_documents=True,
     )
@@ -80,15 +89,21 @@ def lambda_handler(event, context):
     conversation_id = event["pathParameters"]["conversationid"]
     user = event["requestContext"]["authorizer"]["claims"]["sub"]
 
-    embeddings = get_embeddings()
-    faiss_index = get_faiss_index(embeddings, user, file_name)
-    memory = create_memory(conversation_id)
     bedrock_runtime = boto3.client(
         service_name="bedrock-runtime",
         region_name=REGION,
     )
 
-    response = bedrock_chain(faiss_index, memory, human_input, bedrock_runtime)
+    embeddings = BedrockEmbeddings(
+        model_id=EMBEDDING_MODEL_ID,
+        client=bedrock_runtime,
+        region_name=REGION,
+    )
+    
+    vector_store = get_vector_store(embeddings, user, file_name)
+    memory = create_memory(conversation_id)
+
+    response = bedrock_chain(vector_store, memory, human_input, bedrock_runtime)
     if response:
         print(f"{MODEL_ID} -\nPrompt: {human_input}\n\nResponse: {response['answer']}")
     else:

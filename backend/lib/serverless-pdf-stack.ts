@@ -418,7 +418,7 @@ export class ServerlessPdfChatStack extends Stack {
       }),
       new iam.PolicyStatement({
         actions: ['s3:*'],
-        resources: [`arn:aws:s3:::${cdk.Aws.STACK_NAME}-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}*`, `arn:aws:s3:::${cdk.Aws.STACK_NAME}-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}*/*`],
+        resources: [documentBucket.bucketArn, `${documentBucket.bucketArn}/*`],
       }),
     ]);
     const deleteDocumentFunctionIntegration = new apigateway.LambdaIntegration(deleteDocumentFunction);

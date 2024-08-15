@@ -85,7 +85,7 @@ def lambda_handler(event, context):
     s3.upload_file("/tmp/index.pkl", BUCKET, f"{user_id}/{file_name_full}/index.pkl")
     '''
 
-    collection_name = 'document_collection'
+    collection_name = f"{user_id}_{file_name_full}"
     db_secret = get_db_secret()
 
     vector_store = PGVector(
